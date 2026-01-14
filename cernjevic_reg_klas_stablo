@@ -1,0 +1,189 @@
+import pandas as pd
+import numpy as np
+import seaborn as sns
+import matplotlib.pyplot as plt
+import os
+
+from sklearn.model_selection import train_test_split, cross_validate, KFold, StratifiedKFold
+from sklearn.tree import DecisionTreeRegressor, DecisionTreeClassifier, plot_tree
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.metrics import mean_squared_error, mean_absolute_error, make_scorer
+
+# Postavljanje stila
+sns.set_theme(style="whitegrid")
+
+# ==============================================================================
+# 1. FUNKCIJE ZA SPREMANJE I CRTANJE (INFRASTRUKTURA)
+# ==============================================================================
+
+def save_regression_metrics(model_name, cv_results, filename="results_cv_metric.csv"):
+    """Sprema rezultate regresije (kompatibilno s Valecom)."""
+    rmse_scores = -cv_results["test_rmse"]
+    mae_scores = -cv_results["test_mae"]
+    r2_scores = cv_results["test_r2"]
+
+    new_row = {
+        "model": model_name,
+        "fast_mode": False,
+        "rmse_mean": float(rmse_scores.mean()),
+        "rmse_std": float(rmse_scores.std(ddof=1)),
+        "mae_mean": float(mae_scores.mean()),
+        "mae_std": float(mae_scores.std(ddof=1)),
+        "r2_mean": float(r2_scores.mean()),
+        "r2_std": float(r2_scores.std(ddof=1)),
+    }
+    
+    df_new = pd.DataFrame([new_row])
+    if os.path.exists(filename):
+        df_new.to_csv(filename, mode='a', header=False, index=False)
+    else:
+        df_new.to_csv(filename, index=False)
+    print(f"[REGRESIJA] Rezultati za {model_name} spremljeni u {filename}")
+
+def save_classification_metrics(model_name, cv_results, filename="results_cls_metric.csv"):
+    """Sprema rezultate klasifikacije u NOVI file."""
+    acc_scores = cv_results["test_accuracy"]
+    f1_scores = cv_results["test_f1_macro"]
+
+    new_row = {
+        "model": model_name,
+        "accuracy_mean": float(acc_scores.mean()),
+        "accuracy_std": float(acc_scores.std(ddof=1)),
+        "f1_mean": float(f1_scores.mean()),
+        "f1_std": float(f1_scores.std(ddof=1)),
+    }
+
+    df_new = pd.DataFrame([new_row])
+    if os.path.exists(filename):
+        df_new.to_csv(filename, mode='a', header=False, index=False)
+    else:
+        df_new.to_csv(filename, index=False)
+    print(f"[KLASIFIKACIJA] Rezultati za {model_name} spremljeni u {filename}")
+
+def plot_classification_comparison(filename="results_cls_metric.csv"):
+    """Učitava CSV s klasifikacijskim rezultatima i crta usporedne grafove."""
+    if not os.path.exists(filename):
+        print("Nema rezultata za klasifikaciju.")
+        return
+
+    df = pd.read_csv(filename)
+    df = df.drop_duplicates(subset=["model"], keep="last")
+    
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    
+    # 1. Accuracy
+    sns.barplot(x="model", y="accuracy_mean", data=df, ax=axes[0], palette="viridis")
+    axes[0].set_title("Usporedba točnosti (Accuracy)")
+    axes[0].set_ylim(0, 1.0)
+    for i, v in enumerate(df["accuracy_mean"]):
+        axes[0].text(i, v + 0.01, f"{v:.4f}", ha='center')
+
+    # 2. F1 Score
+    sns.barplot(x="model", y="f1_mean", data=df, ax=axes[1], palette="magma")
+    axes[1].set_title("Usporedba F1 Score (Macro)")
+    axes[1].set_ylim(0, 1.0)
+    for i, v in enumerate(df["f1_mean"]):
+        axes[1].text(i, v + 0.01, f"{v:.4f}", ha='center')
+
+    plt.tight_layout()
+    plt.show()
+
+# ==============================================================================
+# 2. GLAVNI KOD (Učitavanje i Preprocessing)
+# ==============================================================================
+df = sns.load_dataset("diamonds")
+
+# --- PRIPREMA ZA REGRESIJU ---
+X_reg = df.drop(columns=['price'])
+y_reg = df['price']
+cat_cols_reg = X_reg.select_dtypes(include=['category', 'object']).columns.tolist()
+num_cols_reg = X_reg.select_dtypes(include=['number']).columns.tolist()
+prep_reg = ColumnTransformer([
+    ('num', 'passthrough', num_cols_reg),
+    ('cat', OneHotEncoder(handle_unknown='ignore'), cat_cols_reg)
+])
+
+# --- PRIPREMA ZA KLASIFIKACIJU ---
+X_cls = df.drop(columns=['cut'])
+y_cls = df['cut']
+cat_cols_cls = X_cls.select_dtypes(include=['category', 'object']).columns.tolist()
+num_cols_cls = X_cls.select_dtypes(include=['number']).columns.tolist()
+prep_cls = ColumnTransformer([
+    ('num', 'passthrough', num_cols_cls),
+    ('cat', OneHotEncoder(handle_unknown='ignore'), cat_cols_cls)
+])
+
+# ==============================================================================
+# 3. IMPLEMENTACIJA I EVALUACIJA (Decision Tree)
+# ==============================================================================
+
+# --- A) REGRESIJSKO STABLO ---
+print("\n" + "="*40)
+print("POKRETANJE REGRESIJE (Decision Tree)")
+print("="*40)
+
+# 1. Vizualizacija (max_depth=4) -> ČITLJIVA SLIKA
+X_tr_r, X_te_r, y_tr_r, y_te_r = train_test_split(X_reg, y_reg, test_size=0.2, random_state=42)
+viz_reg = Pipeline([('prep', prep_reg), ('model', DecisionTreeRegressor(max_depth=4, random_state=42))])
+viz_reg.fit(X_tr_r, y_tr_r)
+
+plt.figure(figsize=(20, 8))
+ft_names_reg = num_cols_reg + list(viz_reg.named_steps['prep'].named_transformers_['cat'].get_feature_names_out(cat_cols_reg))
+plot_tree(viz_reg.named_steps['model'], feature_names=ft_names_reg, filled=True, fontsize=10, precision=0)
+plt.title("Vizualizacija Regresijskog Stabla (Price, depth=4)")
+plt.show()
+
+# 2. Evaluacija (max_depth=20) -> TOČNI REZULTATI
+# Bitno: Koristimo KFold sa SHUFFLE=True da izbjegnemo loše rezultate zbog sortiranih podataka
+dt_reg = Pipeline([('prep', prep_reg), ('model', DecisionTreeRegressor(max_depth=20, random_state=42))])
+
+scoring_reg = {
+    'rmse': make_scorer(lambda y, yp: np.sqrt(mean_squared_error(y, yp)), greater_is_better=False),
+    'mae': make_scorer(mean_absolute_error, greater_is_better=False),
+    'r2': 'r2'
+}
+cv_reg_shuffled = KFold(n_splits=5, shuffle=True, random_state=42)
+
+res_reg = cross_validate(dt_reg, X_reg, y_reg, cv=cv_reg_shuffled, scoring=scoring_reg, n_jobs=-1)
+
+# Ispis za provjeru
+print(f"CV RMSE Mean: {-res_reg['test_rmse'].mean():.2f}")
+print(f"CV R2 Mean: {res_reg['test_r2'].mean():.4f}")
+
+save_regression_metrics("DecisionTree", res_reg)
+
+
+# --- B) KLASIFIKACIJSKO STABLO ---
+print("\n" + "="*40)
+print("POKRETANJE KLASIFIKACIJE (Decision Tree)")
+print("="*40)
+
+# 1. Vizualizacija (max_depth=4) -> ČITLJIVA SLIKA
+X_tr_c, X_te_c, y_tr_c, y_te_c = train_test_split(X_cls, y_cls, test_size=0.2, random_state=42, stratify=y_cls)
+viz_clf = Pipeline([('prep', prep_cls), ('model', DecisionTreeClassifier(max_depth=4, random_state=42, criterion='gini'))])
+viz_clf.fit(X_tr_c, y_tr_c)
+
+plt.figure(figsize=(24, 10))
+ft_names_cls = num_cols_cls + list(viz_clf.named_steps['prep'].named_transformers_['cat'].get_feature_names_out(cat_cols_cls))
+plot_tree(viz_clf.named_steps['model'], feature_names=ft_names_cls, class_names=viz_clf.named_steps['model'].classes_.astype(str), filled=True, fontsize=9)
+plt.title("Vizualizacija Klasifikacijskog Stabla (Cut, depth=4)")
+plt.show()
+
+# 2. Evaluacija (max_depth=20) -> TOČNI REZULTATI
+dt_clf = Pipeline([('prep', prep_cls), ('model', DecisionTreeClassifier(max_depth=20, random_state=42))])
+cv_strat = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+scoring_cls = {'accuracy': 'accuracy', 'f1_macro': 'f1_macro'}
+
+res_cls = cross_validate(dt_clf, X_cls, y_cls, cv=cv_strat, scoring=scoring_cls, n_jobs=-1)
+
+# Ispis za provjeru
+print(f"CV Accuracy: {res_cls['test_accuracy'].mean():.4f}")
+print(f"CV F1 Macro: {res_cls['test_f1_macro'].mean():.4f}")
+
+save_classification_metrics("DecisionTree", res_cls)
+
+# --- CRTANJE USPOREDBE ---
+print("\nGeneriranje grafova za klasifikaciju...")
+plot_classification_comparison()
