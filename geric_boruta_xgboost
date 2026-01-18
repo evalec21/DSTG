@@ -1,104 +1,128 @@
 import pandas as pd
 import numpy as np
 import seaborn as sns
-import xgboost as xgb
-from boruta import BorutaPy
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import OneHotEncoder, LabelEncoder
-from sklearn.metrics import mean_squared_error, mean_absolute_error, accuracy_score
 import dalex as dx
+from xgboost import XGBRegressor, XGBClassifier
+from boruta import BorutaPy
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score, accuracy_score, f1_score
 
-# 1. Učitavanje podataka
-df = sns.load_dataset("diamonds")
+# 1. UCITAVANJE I PRIPREMA PODATAKA
+print("Učitavanje podataka...")
+df = sns.load_dataset('diamonds')
 
-# Razdvajanje X i y
-X = df.drop(columns=['cut'])
-y = df['cut']
+# Encoding kategorskih varijabli
+le_color = LabelEncoder()
+le_clarity = LabelEncoder()
+le_cut = LabelEncoder()
 
-# Kodiranje ciljne varijable
-le = LabelEncoder()
-y_encoded = le.fit_transform(y)
+df['color_enc'] = le_color.fit_transform(df['color'])
+df['clarity_enc'] = le_clarity.fit_transform(df['clarity'])
+df['cut_enc'] = le_cut.fit_transform(df['cut'])
 
-# Definiranje tipova stupaca
-cat_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
-num_cols = X.select_dtypes(exclude=['object', 'category']).columns.tolist()
+# Definiranje ulaznih značajki
+features = ['carat', 'depth', 'table', 'x', 'y', 'z', 'color_enc', 'clarity_enc']
+X = df[features]
 
-# Preprocessing
-preprocessor = ColumnTransformer(
-    transformers=[
-        ('cat', OneHotEncoder(handle_unknown='ignore', sparse_output=False), cat_cols),
-        ('num', 'passthrough', num_cols)
-    ]
-)
+# --- DIO 1: REGRESIJA (Cilj: price) ---
+print("\n--- REGRESIJSKI ZADATAK (XGBoost) ---")
+y_reg = df['price']
+X_train_r, X_test_r, y_train_r, y_test_r = train_test_split(X, y_reg, test_size=0.2, random_state=42)
 
-X_processed = preprocessor.fit_transform(X)
-feature_names = preprocessor.get_feature_names_out()
+# Boruta selekcija značajki za regresiju
+print("Pokrećem Boruta selekciju za regresiju (može potrajati par minuta)...")
+rf_boruta_reg = RandomForestRegressor(n_jobs=-1, max_depth=5, n_estimators=50)
+boruta_selector_reg = BorutaPy(rf_boruta_reg, n_estimators='auto', verbose=0, random_state=1)
+boruta_selector_reg.fit(X_train_r.values, y_train_r.values)
+selected_features_reg = X.columns[boruta_selector_reg.support_].tolist()
+print(f"Boruta odabrane značajke za regresiju: {selected_features_reg}")
 
-# 2. Boruta selekcija
-rf = RandomForestClassifier(n_jobs=-1, max_depth=5, random_state=42, class_weight='balanced')
-boruta_selector = BorutaPy(rf, n_estimators='auto', verbose=0, random_state=42)
-boruta_selector.fit(X_processed, y_encoded)
+# Treniranje regresijskog modela
+xgb_reg = XGBRegressor(n_estimators=100, learning_rate=0.1, max_depth=6, random_state=42)
+xgb_reg.fit(X_train_r[selected_features_reg], y_train_r)
 
-X_filtered = X_processed[:, boruta_selector.support_]
-selected_features = feature_names[boruta_selector.support_]
-X_filtered_df = pd.DataFrame(X_filtered, columns=selected_features)
+# Evaluacija regresije
+y_pred_r = xgb_reg.predict(X_test_r[selected_features_reg])
+rmse = np.sqrt(mean_squared_error(y_test_r, y_pred_r))
+mae = mean_absolute_error(y_test_r, y_pred_r)
+r2 = r2_score(y_test_r, y_pred_r)
 
-# 3. XGBoost Klasifikacija
-xgb_model = xgb.XGBClassifier(
-    n_estimators=500,
-    learning_rate=0.05,
-    max_depth=6,
-    random_state=42,
-    objective='multi:softprob'
-)
-xgb_model.fit(X_filtered, y_encoded)
+print(f"REGRESIJA REZULTATI:")
+print(f"RMSE: {rmse:.2f}")
+print(f"MAE: {mae:.2f}")
+print(f"R2: {r2:.4f}")
 
-# --- MATEMATIČKA ANALIZA (RMSE, MAE, ACCURACY) ---
-# Predviđanje klasa i vjerojatnosti
-y_pred = xgb_model.predict(X_filtered)
+# --- DIO 2: KLASIFIKACIJA (Cilj: cut) ---
+print("\n--- KLASIFIKACIJSKI ZADATAK (XGBoost) ---")
+y_cls = df['cut_enc']
+X_train_c, X_test_c, y_train_c, y_test_c = train_test_split(X, y_cls, test_size=0.2, random_state=42)
 
-# Izračun metrika (promatramo klase kao rangirane brojeve 0-4)
-rmse = np.sqrt(mean_squared_error(y_encoded, y_pred))
-mae = mean_absolute_error(y_encoded, y_pred)
-accuracy = accuracy_score(y_encoded, y_pred)
+# Boruta selekcija značajki za klasifikaciju (opcionalno, možeš koristiti sve značajke)
+print("Pokrećem Boruta selekciju za klasifikaciju...")
+rf_boruta_cls = RandomForestRegressor(n_jobs=-1, max_depth=5, n_estimators=50) # Boruta za klasifikaciju koristi RF Regressor
+boruta_selector_cls = BorutaPy(rf_boruta_cls, n_estimators='auto', verbose=0, random_state=1)
+boruta_selector_cls.fit(X_train_c.values, y_train_c.values) # Treba y.values biti numeri?
+selected_features_cls = X.columns[boruta_selector_cls.support_].tolist()
+print(f"Boruta odabrane značajke za klasifikaciju: {selected_features_cls}")
 
-# Spremanje metrika u CSV
+# Treniranje klasifikacijskog modela
+xgb_cls = XGBClassifier(n_estimators=100, learning_rate=0.1, max_depth=6, random_state=42, eval_metric='mlogloss', use_label_encoder=False)
+xgb_cls.fit(X_train_c[selected_features_cls], y_train_c)
+
+# Evaluacija klasifikacije
+y_pred_c = xgb_cls.predict(X_test_c[selected_features_cls])
+acc = accuracy_score(y_test_c, y_pred_c)
+f1 = f1_score(y_test_c, y_pred_c, average='weighted')
+
+print(f"KLASIFIKACIJA REZULTATI:")
+print(f"Accuracy: {acc:.4f}")
+print(f"F1-Score (weighted): {f1:.4f}")
+
+# --- DIO 3: SPREMANJE REZULTATA I DALEX ---
+# Spremanje metrike u CSV za usporedbu s kolegama
 metrics_df = pd.DataFrame({
-    'Metric': ['RMSE', 'MAE', 'Accuracy'],
-    'Value': [rmse, mae, accuracy],
-    'Formula': [
-        r'RMSE = \sqrt{\frac{1}{n} \sum_{i=1}^{n} (y_i - \hat{y}_i)^2}',
-        r'MAE = \frac{1}{n} \sum_{i=1}^{n} |y_i - \hat{y}_i|',
-        'Accuracy = Correct Predictions / Total Predictions'
-    ]
+    'Model': ['XGBoost Regresija', 'XGBoost Klasifikacija'],
+    'RMSE': [rmse, np.nan],
+    'MAE': [mae, np.nan],
+    'R2': [r2, np.nan],
+    'Accuracy': [np.nan, acc],
+    'F1_Score': [np.nan, f1]
 })
-metrics_df.to_csv('model_performance_metrics.csv', index=False)
+metrics_df.to_csv('moje_metrike_usporedba.csv', index=False)
 
-# 4. DALEX Interpretacija
-explainer = dx.Explainer(
-    xgb_model, 
-    X_filtered_df, 
-    y_encoded, 
-    label="XGBoost Diamond Cut Model",
-    model_type='classification'
-)
+print("\nGeneriram HTML vizualizacije...")
 
-# Eksport interpretacijskih rezultata
-boruta_df = pd.DataFrame({'feature': feature_names, 'is_important': boruta_selector.support_, 'rank': boruta_selector.ranking_})
-boruta_df.to_csv('boruta_report.csv', index=False)
+# Funkcija za spremanje HTML grafova
+def save_html_plots(explainer_obj, X_data_subset, prefix_name):
+    # Globalna važnost značajki
+    explainer_obj.model_parts().plot(show=False).write_html(f"{prefix_name}_1_Importance.html")
+    
+    # SHAP (za prvu opservaciju)
+    obs = X_data_subset.iloc[[0]]
+    explainer_obj.predict_parts(obs, type='shap').plot(show=False).write_html(f"{prefix_name}_2_SHAP.html")
+    
+    # Partial Dependence Plot (PDP) za 'carat'
+    explainer_obj.model_profile(variables=['carat'], type='partial').plot(show=False).write_html(f"{prefix_name}_3_PDP_Carat.html")
+    
+    # Accumulated Local Effects (ALE) za 'carat'
+    explainer_obj.model_profile(variables=['carat'], type='accumulated').plot(show=False).write_html(f"{prefix_name}_4_ALE_Carat.html")
+    
+    # Ceteris Paribus za 'carat'
+    explainer_obj.predict_profile(obs, variables=['carat']).plot(show=False).write_html(f"{prefix_name}_5_CeterisParibus_Carat.html")
+    print(f"HTML grafovi za {prefix_name} spremljeni.")
 
-vi = explainer.model_parts()
-vi.result.to_csv('global_importance.csv', index=False)
+# Dalex Explainer i spremanje grafova za Regresiju
+exp_reg = dx.Explainer(xgb_reg, X_test_r[selected_features_reg], y_test_r, label="XGBoost_Price")
+save_html_plots(exp_reg, X_test_r[selected_features_reg], "REGRESIJA")
 
-# SHAP za prvi red
-shap = explainer.predict_parts(X_filtered_df.iloc[0, :], type='shap')
-shap.result.to_csv('shap_prediction_analysis.csv', index=False)
+# Dalex Explainer i spremanje grafova za Klasifikaciju
+# Upozorenje: Za klasifikaciju, y_test_c su enkodirani brojevi, DALEX ih može interpretirati.
+exp_cls = dx.Explainer(xgb_cls, X_test_c[selected_features_cls], y_test_c, label="XGBoost_Cut")
+save_html_plots(exp_cls, X_test_c[selected_features_cls], "KLASIFIKACIJA")
 
-print("-" * 30)
-print(f"MATEMATIČKA ANALIZA:")
-print(f"RMSE: {rmse:.4f}")
-print(f"MAE: {mae:.4f}")
-print(f"Accuracy: {accuracy:.4f}")
-print("-" * 30)
-print("Svi rezultati su spremljeni u CSV datoteke.")
+# Izvoz kompletnog procesiranog dataseta
+df.to_csv('diamonds_final_processed.csv', index=False)
+print("\nSVE GOTOVO!")
+print("Provjeri direktorij za 'moje_metrike_usporedba.csv' i 10 HTML datoteka (5 za REGRESIJU i 5 za KLASIFIKACIJU).")
