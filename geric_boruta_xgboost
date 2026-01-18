@@ -1,0 +1,104 @@
+import pandas as pd
+import numpy as np
+import seaborn as sns
+import xgboost as xgb
+from boruta import BorutaPy
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, LabelEncoder
+from sklearn.metrics import mean_squared_error, mean_absolute_error, accuracy_score
+import dalex as dx
+
+# 1. Učitavanje podataka
+df = sns.load_dataset("diamonds")
+
+# Razdvajanje X i y
+X = df.drop(columns=['cut'])
+y = df['cut']
+
+# Kodiranje ciljne varijable
+le = LabelEncoder()
+y_encoded = le.fit_transform(y)
+
+# Definiranje tipova stupaca
+cat_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
+num_cols = X.select_dtypes(exclude=['object', 'category']).columns.tolist()
+
+# Preprocessing
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('cat', OneHotEncoder(handle_unknown='ignore', sparse_output=False), cat_cols),
+        ('num', 'passthrough', num_cols)
+    ]
+)
+
+X_processed = preprocessor.fit_transform(X)
+feature_names = preprocessor.get_feature_names_out()
+
+# 2. Boruta selekcija
+rf = RandomForestClassifier(n_jobs=-1, max_depth=5, random_state=42, class_weight='balanced')
+boruta_selector = BorutaPy(rf, n_estimators='auto', verbose=0, random_state=42)
+boruta_selector.fit(X_processed, y_encoded)
+
+X_filtered = X_processed[:, boruta_selector.support_]
+selected_features = feature_names[boruta_selector.support_]
+X_filtered_df = pd.DataFrame(X_filtered, columns=selected_features)
+
+# 3. XGBoost Klasifikacija
+xgb_model = xgb.XGBClassifier(
+    n_estimators=500,
+    learning_rate=0.05,
+    max_depth=6,
+    random_state=42,
+    objective='multi:softprob'
+)
+xgb_model.fit(X_filtered, y_encoded)
+
+# --- MATEMATIČKA ANALIZA (RMSE, MAE, ACCURACY) ---
+# Predviđanje klasa i vjerojatnosti
+y_pred = xgb_model.predict(X_filtered)
+
+# Izračun metrika (promatramo klase kao rangirane brojeve 0-4)
+rmse = np.sqrt(mean_squared_error(y_encoded, y_pred))
+mae = mean_absolute_error(y_encoded, y_pred)
+accuracy = accuracy_score(y_encoded, y_pred)
+
+# Spremanje metrika u CSV
+metrics_df = pd.DataFrame({
+    'Metric': ['RMSE', 'MAE', 'Accuracy'],
+    'Value': [rmse, mae, accuracy],
+    'Formula': [
+        r'RMSE = \sqrt{\frac{1}{n} \sum_{i=1}^{n} (y_i - \hat{y}_i)^2}',
+        r'MAE = \frac{1}{n} \sum_{i=1}^{n} |y_i - \hat{y}_i|',
+        'Accuracy = Correct Predictions / Total Predictions'
+    ]
+})
+metrics_df.to_csv('model_performance_metrics.csv', index=False)
+
+# 4. DALEX Interpretacija
+explainer = dx.Explainer(
+    xgb_model, 
+    X_filtered_df, 
+    y_encoded, 
+    label="XGBoost Diamond Cut Model",
+    model_type='classification'
+)
+
+# Eksport interpretacijskih rezultata
+boruta_df = pd.DataFrame({'feature': feature_names, 'is_important': boruta_selector.support_, 'rank': boruta_selector.ranking_})
+boruta_df.to_csv('boruta_report.csv', index=False)
+
+vi = explainer.model_parts()
+vi.result.to_csv('global_importance.csv', index=False)
+
+# SHAP za prvi red
+shap = explainer.predict_parts(X_filtered_df.iloc[0, :], type='shap')
+shap.result.to_csv('shap_prediction_analysis.csv', index=False)
+
+print("-" * 30)
+print(f"MATEMATIČKA ANALIZA:")
+print(f"RMSE: {rmse:.4f}")
+print(f"MAE: {mae:.4f}")
+print(f"Accuracy: {accuracy:.4f}")
+print("-" * 30)
+print("Svi rezultati su spremljeni u CSV datoteke.")
